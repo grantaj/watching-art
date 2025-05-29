@@ -16,6 +16,11 @@ face_mesh = mp_face_mesh.FaceMesh(refine_landmarks=True, max_num_faces=1)
 # Set up camera
 cap = cv2.VideoCapture(0)
 
+# Smoothing parameters
+smoothed_x = None
+smoothed_y = None
+alpha = 0.2  # adjust between 0 (no update) and 1 (no smoothing)
+
 # Calibration state and data
 calibrating = False
 calibration_data = []
@@ -93,6 +98,7 @@ def draw_landmarks(frame, landmarks, width, height):
 
 
 def render_gaze_point(normal):
+    global smoothed_x, smoothed_y
     # Live calibration updates
     if calibrating:
         update_calibration_bounds_live(normal)
@@ -100,6 +106,13 @@ def render_gaze_point(normal):
 
     # Map to screen coordinates
     x, y = normalize_to_screen(normal[0], normal[1])
+
+    # Apply exponential smoothing
+    if smoothed_x is None or smoothed_y is None:
+        smoothed_x, smoothed_y = x, y
+    else:
+        smoothed_x = int((1 - alpha) * smoothed_x + alpha * x)
+        smoothed_y = int((1 - alpha) * smoothed_y + alpha * y)
 
     # Create gaze frame
     gaze_frame = np.zeros((screen_height, screen_width, 3), dtype=np.uint8)
@@ -110,13 +123,18 @@ def render_gaze_point(normal):
     cv2.line(gaze_frame, (0, top_bound), (screen_width, top_bound), (0, 0, 255), 2)
     cv2.line(gaze_frame, (0, bottom_bound), (screen_width, bottom_bound), (0, 0, 255), 2)
 
-    # Draw gaze dot
-    cv2.circle(gaze_frame, (x, y), 10, (0, 255, 0), -1)
-    cv2.putText(gaze_frame, f"Gaze: ({x}, {y})", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (200, 200, 200), 2)
+    # Draw smoothed gaze dot
+    cv2.circle(gaze_frame, (smoothed_x, smoothed_y), 10, (0, 255, 0), -1)
+    cv2.putText(gaze_frame, f"Gaze: ({smoothed_x}, {smoothed_y})", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (200, 200, 200), 2)
     cv2.imshow('Gaze Point (Normal Vector)', gaze_frame)
 
+# Main loop
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
 
-def process_frame(frame):
+    frame = cv2.flip(frame, 1)
     h, w = frame.shape[:2]
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     result = face_mesh.process(rgb)
@@ -131,32 +149,21 @@ def process_frame(frame):
         draw_landmarks(frame, mesh, w, h)
         render_gaze_point(head_normal)
 
-    return frame
-
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
-
-    frame = cv2.flip(frame, 1)
-    frame = process_frame(frame)
     cv2.imshow('Webcam', frame)
 
     key = cv2.waitKey(1) & 0xFF
     if key == 27:  # ESC to quit
         break
-    elif key == ord('r'):
-        if not calibrating:
-            calibrating = True
-            calibration_data.clear()
-            min_x, max_x = -0.5, 0.5
-            min_y, max_y = -0.5, 0.5
-            print("Calibration started. Move your head to the edges of the screen.")
-    elif key == ord('s'):
-        if calibrating:
-            calibrating = False
-            update_calibration_bounds_from_history()
-            print(f"Calibration stopped. Y-range: {min_y:.2f} to {max_y:.2f}")
+    elif key == ord('r') and not calibrating:
+        calibrating = True
+        calibration_data.clear()
+        min_x, max_x = -0.5, 0.5
+        min_y, max_y = -0.5, 0.5
+        print("Calibration started. Move your head to the edges of the screen.")
+    elif key == ord('s') and calibrating:
+        calibrating = False
+        update_calibration_bounds_from_history()
+        print(f"Calibration stopped. Y-range: {min_y:.2f} to {max_y:.2f}")
 
 cap.release()
 cv2.destroyAllWindows()
