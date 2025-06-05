@@ -3,65 +3,68 @@ import mediapipe as mp
 import numpy as np
 
 mp_face_mesh = mp.solutions.face_mesh
-face_mesh = mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1)
-mp_drawing = mp.solutions.drawing_utils
-
+face_mesh = mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1, refine_landmarks=True)
 cap = cv2.VideoCapture(0)
 
-# 3D model points for pose estimation (nose, eyes, mouth)
-model_points = np.array([
-    (0.0, 0.0, 0.0),        # Nose tip
-    (0.0, -330.0, -65.0),   # Chin
-    (-225.0, 170.0, -135.0), # Left eye left corner
-    (225.0, 170.0, -135.0),  # Right eye right corner
-    (-150.0, -150.0, -125.0), # Left mouth corner
-    (150.0, -150.0, -125.0)  # Right mouth corner
-])
+# Landmark indices
+LEFT_EYE_INDICES = [33, 133, 159, 145]  # outer, inner, top, bottom
+RIGHT_EYE_INDICES = [362, 263, 386, 374]
+LEFT_IRIS_INDICES = [468, 469, 470, 471]  # 4 points on iris, center is approx their average
+RIGHT_IRIS_INDICES = [473, 474, 475, 476]
+
+def average_point(points):
+    return np.mean(points, axis=0)
 
 while True:
-    success, image = cap.read()
-    if not success:
+    ret, frame = cap.read()
+    if not ret:
         break
 
-    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    results = face_mesh.process(image_rgb)
+    h, w = frame.shape[:2]
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    results = face_mesh.process(rgb_frame)
 
     if results.multi_face_landmarks:
-        h, w, _ = image.shape
-        landmarks = results.multi_face_landmarks[0].landmark
+        mesh = results.multi_face_landmarks[0].landmark
 
-        # Get 2D image points
-        image_points = np.array([
-            (landmarks[1].x * w, landmarks[1].y * h),    # Nose tip
-            (landmarks[152].x * w, landmarks[152].y * h), # Chin
-            (landmarks[33].x * w, landmarks[33].y * h),   # Left eye left
-            (landmarks[263].x * w, landmarks[263].y * h), # Right eye right
-            (landmarks[78].x * w, landmarks[78].y * h),   # Left mouth corner
-            (landmarks[308].x * w, landmarks[308].y * h)  # Right mouth corner
-        ], dtype="double")
+        def get_coords(indices):
+            return np.array([[mesh[i].x * w, mesh[i].y * h] for i in indices], dtype=np.float32)
 
-        focal_length = w
-        center = (w / 2, h / 2)
-        camera_matrix = np.array([
-            [focal_length, 0, center[0]],
-            [0, focal_length, center[1]],
-            [0, 0, 1]
-        ], dtype="double")
+        # Left Eye
+        left_eye = get_coords(LEFT_EYE_INDICES)
+        left_iris = get_coords(LEFT_IRIS_INDICES)
+        left_iris_center = average_point(left_iris)
 
-        dist_coeffs = np.zeros((4, 1))  # Assuming no lens distortion
-        success, rotation_vector, translation_vector = cv2.solvePnP(
-            model_points, image_points, camera_matrix, dist_coeffs)
+        # Right Eye
+        right_eye = get_coords(RIGHT_EYE_INDICES)
+        right_iris = get_coords(RIGHT_IRIS_INDICES)
+        right_iris_center = average_point(right_iris)
 
-        # Draw nose direction
-        nose_end = cv2.projectPoints(
-            np.array([(0.0, 0.0, 1000.0)]),
-            rotation_vector, translation_vector, camera_matrix, dist_coeffs)[0]
+        # Draw left eye box
+        cv2.polylines(frame, [left_eye.astype(np.int32)], isClosed=True, color=(0, 255, 0), thickness=1)
+        cv2.circle(frame, tuple(left_iris_center.astype(int)), 2, (0, 255, 255), -1)
 
-        p1 = (int(image_points[0][0]), int(image_points[0][1]))
-        p2 = (int(nose_end[0][0][0]), int(nose_end[0][0][1]))
-        cv2.line(image, p1, p2, (255, 0, 0), 2)
+        # Draw right eye box
+        cv2.polylines(frame, [right_eye.astype(np.int32)], isClosed=True, color=(0, 255, 0), thickness=1)
+        cv2.circle(frame, tuple(right_iris_center.astype(int)), 2, (0, 255, 255), -1)
 
-    cv2.imshow('Gaze Tracker', image)
+        # Estimate eye directions as vector from eye center to iris center
+        left_eye_center = average_point([left_eye[0], left_eye[1]])  # outer + inner
+        right_eye_center = average_point([right_eye[0], right_eye[1]])
+
+        left_gaze_vector = left_iris_center - left_eye_center
+        right_gaze_vector = right_iris_center - right_eye_center
+
+        # Normalize for display
+        def draw_gaze_vector(origin, vector, color):
+            norm_vector = vector / (np.linalg.norm(vector) + 1e-6)
+            endpoint = origin + norm_vector * 40  # scale for visibility
+            cv2.line(frame, tuple(origin.astype(int)), tuple(endpoint.astype(int)), color, 2)
+
+        draw_gaze_vector(left_eye_center, left_gaze_vector, (255, 0, 0))
+        draw_gaze_vector(right_eye_center, right_gaze_vector, (255, 0, 0))
+
+    cv2.imshow("Eye Direction", frame)
     if cv2.waitKey(5) & 0xFF == 27:
         break
 
